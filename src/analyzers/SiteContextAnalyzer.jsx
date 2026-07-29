@@ -1,300 +1,343 @@
 import React, { useState } from "react";
-import { Sparkles, Search, Image as ImageIcon, Copy, Check, Download, FileText, AlertTriangle, Trash2, Lightbulb, FileJson } from "lucide-react";
+import { Sparkles, Plus, Trash2, MapPin, Info, CheckCircle2, AlertTriangle, XCircle, FileSpreadsheet, FileText, Printer, Search, Image as ImageIcon } from "lucide-react";
+import * as XLSX from "xlsx";
 import { callAI } from "../utils/ai";
 
-export default function SiteContextAnalyzer({ apiKey, apiProvider, model, onGenerateInsights }) {
-  const [siteLocation, setSiteLocation] = useState("Al safa 2 Park,Dubai");
-  const [surroundings, setSurroundings] = useState("");
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [imageData, setImageData] = useState(null);
+const BTN_DARK = { backgroundColor: "#1C2333", color: "#FFFFFF" };
+const BTN_GOLD = { backgroundColor: "#C9A46A", color: "#1C2333" };
 
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [technicalError, setTechnicalError] = useState(null);
-  const [analysisResult, setAnalysisResult] = useState("");
+const CAPACITY_LOW = 150 / 10000;
+const CAPACITY_HIGH = 400 / 10000;
 
-  const [copied, setCopied] = useState(false);
-  const [insightsLoading, setInsightsLoading] = useState(false);
-  const [aiInsights, setAiInsights] = useState("");
+function uid() { return Math.random().toString(36).slice(2, 9); }
 
-  const handleFileChange = (e) => {
+function downloadBlob(content, filename, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function friendlyError(rawMessage) {
+  const msg = (rawMessage || "").toLowerCase();
+  if (msg.includes("json") || msg.includes("expected") || msg.includes("unexpected token")) return "The AI's answer got cut off before it finished. Try again - it often succeeds on retry.";
+  if (msg.includes("api returned") || msg.includes("status")) return "The AI service didn't respond successfully - likely a temporary connection hiccup. Wait a few seconds and try again.";
+  if (msg.includes("empty response")) return "The AI didn't send back any content that time. Try again.";
+  return "Something unexpected happened. Try again - if it keeps failing, note the technical detail below and flag it to Jarvis.";
+}
+
+function extractJSON(text) {
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace === -1 || lastBrace === -1) throw new Error("No JSON object found in the AI response.");
+  return JSON.parse(text.slice(firstBrace, lastBrace + 1));
+}
+
+export default function SiteContextAnalyzer({ apiKey, apiProvider, model }) {
+  const [location, setLocation] = useState("");
+  const [siteDescription, setSiteDescription] = useState("");
+  const [siteImage, setSiteImage] = useState(null);
+  const [imagePreviewName, setImagePreviewName] = useState("");
+  const [context, setContext] = useState(null);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextError, setContextError] = useState("");
+
+  const [zones, setZones] = useState([{ id: uid(), name: "", area: "" }]);
+  const [paths, setPaths] = useState([{ id: uid(), name: "", type: "path", width: "", levelChange: "" }]);
+  const [insight, setInsight] = useState(null);
+  const [insightLoading, setInsightLoading] = useState(false);
+  const [insightError, setInsightError] = useState("");
+
+  async function handleImageUpload(e) {
     const file = e.target.files[0];
-    if (file) {
-      setSelectedFile(file);
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setImageData(reader.result);
-      };
-      reader.readAsDataURL(file);
-    }
-  };
+    if (!file) return;
+    const base64 = await fileToBase64(file);
+    setSiteImage({ base64, mediaType: file.type || "image/png" });
+    setImagePreviewName(file.name);
+    e.target.value = "";
+  }
 
-  const handleClearFile = () => {
-    setSelectedFile(null);
-    setImageData(null);
-  };
-
-  const handleAnalyze = async () => {
-    if (!siteLocation && !surroundings && !imageData) {
-      setError("Please describe the site location, surroundings, or upload a GIS/map image.");
+  async function analyzeSiteContext() {
+    if (!location.trim() && !siteDescription.trim() && !siteImage) {
+      setContextError("Give this tool at least a location, a description, or a site image to analyze.");
       return;
     }
+    setContextLoading(true); setContextError(""); setContext(null);
 
-    setLoading(true);
-    setError(null);
-    setTechnicalError(null);
-    setAnalysisResult("");
-    setAiInsights("");
+    const systemPrompt = `You are a landscape architecture site-analysis assistant. Given the information about a park/public-space project site, produce:
+(1) 'adjacencies': an array of {direction, use, implication} objects describing what's around the site and the design implication of each,
+(2) 'accessibility_standards': an array of {label, value, min_width_m (number), source} objects giving the real, current accessibility standards that apply in this project's jurisdiction.
+Only use information given or verifiable context. If jurisdiction is unclear, state it in a 'note' field and use widely-recognized international guidance as fallback.
+Respond with ONLY valid JSON, no markdown fences: {"adjacencies": [{"direction":"","use":"","implication":""}], "accessibility_standards": [{"label":"","value":"","min_width_m":0,"source":""}], "note": ""}`;
 
-    const systemPrompt = `You are an expert urban planning and architectural site analysis consultant. Provide a detailed, professional analysis of the site context based on the location, surroundings, and image provided. Include urban context, accessibility, environmental factors, microclimate, and strategic design recommendations.`;
-
-    const userPrompt = `Site Name or Address: ${siteLocation || "Unspecified"}
-Site Surroundings & Context: ${surroundings || "None provided"}
-
-Please provide a comprehensive site context analysis.`;
+    const userPrompt = `LOCATION: ${location || "Not specified"}\nSITE DESCRIPTION: ${siteDescription || "Not specified"}`;
 
     try {
-      // Uses active model gemini-2.5-flash instead of deprecated 1.5
-      const activeModel = (!model || model.includes("1.5")) ? "gemini-2.5-flash" : model;
-
-      const result = await callAI({
+      const activeModel = (!model || model.includes("1.5") || model.includes("claude-sonnet-4-6")) ? "gemini-2.5-flash" : model;
+      
+      const resText = await callAI({
         provider: apiProvider || "gemini",
         apiKey: apiKey,
         prompt: userPrompt,
         systemInstruction: systemPrompt,
         model: activeModel,
-        imageData: imageData
+        imageData: siteImage?.base64 ? `data:${siteImage.mediaType};base64,${siteImage.base64}` : null
       });
 
-      setAnalysisResult(result);
-    } catch (err) {
-      console.error("Site Context Analysis Error:", err);
-      const errMsg = err.message || "An unexpected error occurred during analysis.";
-      setError(errMsg);
-      setTechnicalError(errMsg);
+      if (!resText) throw new Error("The AI returned an empty response.");
+      setContext(extractJSON(resText));
+    } catch (e) {
+      setContextError(e.message || "Something went wrong analyzing the site. Try again.");
     } finally {
-      setLoading(false);
+      setContextLoading(false);
     }
-  };
+  }
 
-  const handleGenerateInsights = async () => {
-    if (!analysisResult) return;
+  function addZone() { setZones([...zones, { id: uid(), name: "", area: "" }]); }
+  function updateZone(id, patch) { setZones(zones.map((z) => (z.id === id ? { ...z, ...patch } : z))); }
+  function removeZone(id) { setZones(zones.filter((z) => z.id !== id)); }
+  function addPath() { setPaths([...paths, { id: uid(), name: "", type: "path", width: "", levelChange: "" }]); }
+  function updatePath(id, patch) { setPaths(paths.map((p) => (p.id === id ? { ...p, ...patch } : p))); }
+  function removePath(id) { setPaths(paths.filter((p) => p.id !== id)); }
 
-    setInsightsLoading(true);
+  function capacityRange(area) {
+    const a = Number(area) || 0;
+    return { low: Math.round(a * CAPACITY_LOW), high: Math.round(a * CAPACITY_HIGH) };
+  }
+
+  function minWidthFor(type) {
+    if (!context?.accessibility_standards) return type === "ramp" ? 1.0 : type === "crossing" ? 2.0 : 1.8;
+    const match = context.accessibility_standards.find((s) => (s.label || "").toLowerCase().includes(type));
+    return match?.min_width_m || (type === "ramp" ? 1.0 : type === "crossing" ? 2.0 : 1.8);
+  }
+
+  function checkPath(p) {
+    const w = Number(p.width);
+    const minWidth = minWidthFor(p.type);
+    const lc = Number(p.levelChange) || 0;
+    const issues = [];
+    if (!w) return { status: "pending", label: "Enter width to check" };
+    if (w < minWidth) issues.push(`Width ${w}m is below the ${minWidth}m minimum for a ${p.type}`);
+    if (p.type === "ramp" && lc > 0.5) issues.push(`Level change ${lc}m may require handrails - verify local threshold`);
+    if (p.type === "ramp" && lc === 0) issues.push(`Gradient can't be checked - enter level change or get real elevation data`);
+    if (issues.length === 0) return { status: "pass", label: "Width meets minimum standard" };
+    return { status: "review", label: issues.join("; ") };
+  }
+
+  async function generateInsight() {
+    if (!context) { setInsightError("Run 'Analyze Site Context' above first - this insight builds on that analysis."); return; }
+    setInsightLoading(true); setInsight(null); setInsightError("");
+    const summary = {
+      location: location || "Not specified",
+      adjacencies: context.adjacencies,
+      accessibility_standards_used: context.accessibility_standards,
+      zone_capacity: zones.filter((z) => z.name.trim()).map((z) => ({ zone: z.name, area_m2: z.area, capacity_range: capacityRange(z.area) })),
+      path_accessibility: paths.filter((p) => p.name.trim()).map((p) => ({ path: p.name, type: p.type, width_m: p.width, level_change_m: p.levelChange, check: checkPath(p) })),
+    };
+
     try {
-      const activeModel = (!model || model.includes("1.5")) ? "gemini-2.5-flash" : model;
-      
-      const prompt = `Based on the following site context analysis, extract 5 key actionable strategic design insights for landscape architecture:
+      const activeModel = (!model || model.includes("1.5") || model.includes("claude-sonnet-4-6")) ? "gemini-2.5-flash" : model;
 
-${analysisResult}`;
+      const prompt = `You are a landscape architecture assistant reviewing site context, crowd capacity, and accessibility compliance for a park redesign project, using only the data given - no invented figures. Provide: (1) 1-2 sentences on how adjacent land uses should shape circulation/entry design, (2) any zone whose capacity range looks like it could create crowding or underuse, (3) any path/ramp that failed or needs review, (4) explicitly list the minimum required parameters that should be fed forward as constraints into the Concept Generator step. Then write a 'conclusion' field: 2-3 sentences naming the single highest-priority action. Respond with ONLY valid JSON, no markdown fences: {"findings": [""], "forward_constraints": [""], "conclusion": ""}\n\nDATA:\n${JSON.stringify(summary, null, 2)}`;
 
-      const insights = await callAI({
+      const resText = await callAI({
         provider: apiProvider || "gemini",
         apiKey: apiKey,
         prompt: prompt,
-        systemInstruction: "You are an architectural strategy consultant. Extract key high-impact design insights.",
+        systemInstruction: "You are an architectural strategy expert. Output valid JSON only.",
         model: activeModel
       });
 
-      setAiInsights(insights);
-      if (onGenerateInsights) {
-        onGenerateInsights(insights);
-      }
-    } catch (err) {
-      console.error("Error generating insights:", err);
+      if (!resText) throw new Error("The AI returned an empty response.");
+      setInsight(extractJSON(resText));
+    } catch (e) {
+      setInsightError(e.message || "Something went wrong generating the insight. Try again.");
     } finally {
-      setInsightsLoading(false);
+      setInsightLoading(false);
     }
-  };
+  }
 
-  const handleCopy = () => {
-    const text = aiInsights ? `${analysisResult}\n\n--- AI INSIGHTS ---\n${aiInsights}` : analysisResult;
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+  function buildReportText() {
+    let lines = ["SITE CONTEXT, URBAN FABRIC & ACCESSIBILITY", `Location: ${location || "Not specified"}`, ""];
+    if (context) {
+      lines.push("ADJACENT LAND-USE");
+      (context.adjacencies || []).forEach((a) => lines.push(`  ${a.direction}: ${a.use} - ${a.implication}`));
+      lines.push("", "ACCESSIBILITY STANDARDS");
+      (context.accessibility_standards || []).forEach((s) => lines.push(`  ${s.label}: ${s.value} (source: ${s.source})`));
+    }
+    lines.push("", "ZONE CAPACITY");
+    zones.filter((z) => z.name.trim()).forEach((z) => { const c = capacityRange(z.area); lines.push(`  ${z.name} (${z.area}m2): ${c.low}-${c.high} peak visitors`); });
+    lines.push("", "PATH & RAMP ACCESSIBILITY CHECK");
+    paths.filter((p) => p.name.trim()).forEach((p) => lines.push(`  ${p.name} (${p.type}, ${p.width}m): ${checkPath(p).label}`));
+    if (insight) {
+      lines.push("", "AI FINDINGS");
+      (insight.findings || []).forEach((f) => lines.push(`  - ${f}`));
+      lines.push("", "CONSTRAINTS FOR CONCEPT GENERATOR");
+      (insight.forward_constraints || []).forEach((f) => lines.push(`  - ${f}`));
+      lines.push("", "CONCLUSION", insight.conclusion || "");
+    }
+    return lines.join("\n");
+  }
 
-  const handleExportText = () => {
-    const textContent = `SITE CONTEXT ANALYSIS REPORT\nSite: ${siteLocation}\n\n${analysisResult}\n\n${aiInsights ? `AI INSIGHTS:\n${aiInsights}` : ""}`;
-    const blob = new Blob([textContent], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `Site_Analysis_${siteLocation.replace(/[^a-z0-9]/gi, '_')}.txt`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
+  function exportExcel() {
+    const wb = XLSX.utils.book_new();
+    if (context) {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Direction", "Adjacent Use", "Implication"], ...(context.adjacencies || []).map((a) => [a.direction, a.use, a.implication])]), "Adjacency");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Standard", "Value", "Source"], ...(context.accessibility_standards || []).map((s) => [s.label, s.value, s.source])]), "Access Standards");
+    }
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Zone", "Area m2", "Low Capacity", "High Capacity"], ...zones.filter((z) => z.name.trim()).map((z) => { const c = capacityRange(z.area); return [z.name, z.area, c.low, c.high]; })]), "Zone Capacity");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Path", "Type", "Width m", "Level Change m", "Check"], ...paths.filter((p) => p.name.trim()).map((p) => [p.name, p.type, p.width, p.levelChange, checkPath(p).label])]), "Path Accessibility");
+    if (insight) {
+      const rows = [["Findings"]];
+      (insight.findings || []).forEach((f) => rows.push([f]));
+      rows.push([]); rows.push(["Forward Constraints"]);
+      (insight.forward_constraints || []).forEach((f) => rows.push([f]));
+      rows.push([]); rows.push(["Conclusion", insight.conclusion]);
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), "AI Insight");
+    }
+    downloadBlob(XLSX.write(wb, { bookType: "xlsx", type: "array" }), "site-context-analysis.xlsx", "application/octet-stream");
+  }
 
-  const handleExportJSON = () => {
-    const data = {
-      siteName: siteLocation,
-      surroundings: surroundings,
-      analysis: analysisResult,
-      insights: aiInsights || null
-    };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `Site_Analysis_${siteLocation.replace(/[^a-z0-9]/gi, '_')}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
+  function exportWord() {
+    const rtfBody = buildReportText().replace(/\\/g, "\\\\").replace(/\n/g, "\\par ");
+    downloadBlob(`{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Calibri;}}\\f0\\fs22 ${rtfBody}}`, "site-context-analysis.rtf", "application/rtf");
+  }
+
+  function exportPDF() {
+    const win = window.open("", "_blank");
+    if (!win) { setInsightError("Your browser blocked the new tab needed for PDF export. Allow pop-ups and try again."); return; }
+    const html = `<html><head><title>Site Context Analysis</title><style>body{font-family:Arial;padding:30px;color:#1C2333;}h1{color:#1C2333;}h2{color:#5A5445;border-bottom:1px solid #E8E2D5;}table{border-collapse:collapse;width:100%;font-size:11px;}td,th{border:1px solid #ddd;padding:4px;}.conclusion{background:#FBF1E1;border:1px solid #E8D5B0;padding:14px;border-radius:6px;margin-top:20px;}</style></head><body>
+    <h1>Site Context, Urban Fabric & Accessibility</h1><p>Location: ${location || "Not specified"}</p>
+    ${context ? `<h2>Adjacent Land-Use</h2><table><tr><th>Direction</th><th>Use</th><th>Implication</th></tr>${(context.adjacencies || []).map((a) => `<tr><td>${a.direction}</td><td>${a.use}</td><td>${a.implication}</td></tr>`).join("")}</table>` : ""}
+    <h2>Zone Capacity</h2><ul>${zones.filter((z) => z.name.trim()).map((z) => { const c = capacityRange(z.area); return `<li>${z.name}: ${c.low}-${c.high} visitors</li>`; }).join("")}</ul>
+    <h2>Path Accessibility</h2><ul>${paths.filter((p) => p.name.trim()).map((p) => `<li>${p.name}: ${checkPath(p).label}</li>`).join("")}</ul>
+    ${insight ? `<h2>AI Findings</h2><ul>${(insight.findings || []).map((f) => `<li>${f}</li>`).join("")}</ul>` : ""}
+    ${insight?.conclusion ? `<div class="conclusion"><b>Conclusion:</b> ${insight.conclusion}</div>` : ""}
+    </body></html>`;
+    win.document.write(html); win.document.close();
+    setTimeout(() => { try { win.focus(); win.print(); } catch (e) {} }, 400);
+  }
+
+  const STATUS_ICON = { pass: <CheckCircle2 size={14} className="text-[#3D7A5C]" />, review: <AlertTriangle size={14} className="text-[#B8863B]" />, pending: <XCircle size={14} className="text-[#8A8474]" /> };
 
   return (
-    <div className="space-y-6 max-w-4xl mx-auto">
-      {/* STEP 1 CARD */}
-      <div className="bg-[#fcfaf7] border border-[#e8ded1] rounded-lg p-6 shadow-sm">
-        <h2 className="text-sm font-semibold text-[#6b471c] uppercase tracking-wide mb-4">
-          STEP 1 — DESCRIBE YOUR SITE
-        </h2>
+    <div className="min-h-screen bg-[#F7F5F1] text-[#1C2333] font-sans">
+      <header style={BTN_DARK} className="px-6 py-5">
+        <p className="text-xs tracking-[0.2em] uppercase" style={{ color: "#C9A46A" }}>Site Analysis Tool</p>
+        <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2"><MapPin size={20} style={{ color: "#C9A46A" }} /> Site Context, Urban Fabric & Accessibility</h1>
+        <p className="text-sm mt-1" style={{ color: "#C9C6BE" }}>Give it your site's location, a description, or an image - it researches real adjacency and accessibility standards, then checks your zones/paths against them.</p>
+      </header>
 
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Site Name or Address
+      <div className="max-w-5xl mx-auto p-6 space-y-6">
+        <div className="bg-white rounded-lg border-2 border-[#E8E2D5] overflow-hidden">
+          <div className="px-4 py-3 border-b border-[#E8E2D5] bg-[#FBF7EE]"><h2 className="font-bold text-sm uppercase tracking-wide">Step 1 - Describe Your Site</h2></div>
+          <div className="p-4 space-y-3">
+            <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Project location (e.g. Al Safa 2 Park, Jumeirah, Dubai)" className="w-full text-sm bg-[#F7F5F1] border-2 border-[#E8E2D5] rounded-md p-2.5 focus:border-[#C9A46A] outline-none" />
+            <textarea value={siteDescription} onChange={(e) => setSiteDescription(e.target.value)} placeholder="Describe what's around the site (adjacent buildings, roads, land uses) - or upload a GIS/map image below instead" rows={4} className="w-full text-sm bg-[#F7F5F1] border-2 border-[#E8E2D5] rounded-md p-3 focus:border-[#C9A46A] outline-none resize-y" />
+            <label className="text-sm font-semibold border-2 px-4 py-2.5 rounded-md flex items-center gap-2 cursor-pointer w-fit" style={{ borderColor: "#1C2333", color: "#1C2333", backgroundColor: "#fff" }}>
+              <ImageIcon size={15} /> {imagePreviewName || "Upload Site/GIS Map Image (optional)"}
+              <input type="file" accept="image/*" onChange={handleImageUpload} className="sr-only" />
             </label>
-            <input
-              type="text"
-              value={siteLocation}
-              onChange={(e) => setSiteLocation(e.target.value)}
-              placeholder="Al safa 2 Park,Dubai"
-              className="w-full p-3 bg-white border border-gray-300 rounded-md text-gray-800 focus:outline-none focus:ring-1 focus:ring-amber-500"
-            />
+            <p className="text-[10px] text-[#8A8474]">Image upload may not work inside the Claude mobile app (platform restriction) - try your phone's regular browser, or use the text fields above.</p>
+            <button onClick={analyzeSiteContext} disabled={contextLoading} style={BTN_GOLD} className="w-full text-base font-bold px-4 py-3 rounded-md flex items-center justify-center gap-2 disabled:opacity-40 shadow-md">
+              <Search size={18} /> {contextLoading ? "Researching site context..." : "Analyze Site Context"}
+            </button>
+            {contextLoading && <p className="text-xs text-[#8A8474]">Reading your input and, if needed, searching for real local accessibility standards - this can take a moment.</p>}
+            {contextError && (<div className="space-y-1"><p className="text-xs text-[#3A362C] flex items-start gap-1"><AlertTriangle size={12} className="mt-0.5 shrink-0 text-[#B84C3D]" /> {friendlyError(contextError)}</p><p className="text-[10px] text-[#8A8474] font-mono pl-4">Technical: {contextError}</p></div>)}
+            {context?.note && <p className="text-xs text-[#B8863B] flex items-center gap-1"><Info size={12} /> {context.note}</p>}
           </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Site Surroundings & Context
-            </label>
-            <textarea
-              rows={4}
-              value={surroundings}
-              onChange={(e) => setSurroundings(e.target.value)}
-              placeholder="Describe what's around the site (adjacent buildings, roads, land uses) - or upload a GIS/map image below instead"
-              className="w-full p-3 bg-white border border-gray-300 rounded-md text-gray-800 focus:outline-none focus:ring-1 focus:ring-amber-500"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Upload GIS / Site Map Image
-            </label>
-            <div className="flex items-center space-x-3">
-              <label className="cursor-pointer inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-[#fbf3e6] hover:bg-[#f3e7d3]">
-                <ImageIcon className="w-4 h-4 mr-2 text-gray-600" />
-                Choose file
-                <input
-                  type="file"
-                  accept="image/*,.heic"
-                  onChange={handleFileChange}
-                  className="hidden"
-                />
-              </label>
-              <span className="text-sm text-gray-600">
-                {selectedFile ? selectedFile.name : "No file chosen"}
-              </span>
-              {selectedFile && (
-                <button
-                  onClick={handleClearFile}
-                  className="p-1 text-gray-400 hover:text-red-500"
-                  title="Remove image"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              )}
-            </div>
-            <p className="text-xs text-gray-400 mt-1">
-              Image upload may not work inside the Claude mobile app (platform restriction) - try your phone's regular browser, or use the text fields above.
-            </p>
-          </div>
-
-          <button
-            onClick={handleAnalyze}
-            disabled={loading}
-            className="w-full py-3 px-4 bg-[#c59b27] hover:bg-[#b08920] text-white font-medium rounded-md shadow-sm transition-colors flex items-center justify-center space-x-2 disabled:opacity-50"
-          >
-            <Search className="w-5 h-5" />
-            <span>{loading ? "Analyzing Site Context..." : "Analyze Site Context"}</span>
-          </button>
         </div>
 
-        {error && (
-          <div className="mt-4 p-4 bg-red-50 border border-red-200 text-red-800 rounded-md text-sm space-y-1">
-            <div className="flex items-start space-x-2">
-              <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
-              <div>
-                <strong>Error:</strong> {error}
-              </div>
+        {context && (
+          <>
+            <div className="bg-white rounded-lg border border-[#E8E2D5] overflow-hidden">
+              <div className="px-4 py-3 border-b border-[#E8E2D5]"><h2 className="font-semibold text-sm uppercase tracking-wide text-[#5A5445]">Adjacent Land-Use & Urban Fabric</h2></div>
+              <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-[#8A8474] text-xs uppercase tracking-wide border-b border-[#E8E2D5]"><th className="px-4 py-2">Direction</th><th className="px-4 py-2">Adjacent Use</th><th className="px-4 py-2">Design Implication</th></tr></thead><tbody>{(context.adjacencies || []).map((a, i) => (<tr key={i} className="border-b border-[#F0EBDF]"><td className="px-4 py-2 font-medium">{a.direction}</td><td className="px-4 py-2">{a.use}</td><td className="px-4 py-2 text-[#5A5445] text-xs">{a.implication}</td></tr>))}</tbody></table></div>
             </div>
-            {technicalError && (
-              <p className="text-xs text-red-500 font-mono mt-1 break-all">
-                Technical: {technicalError}
-              </p>
-            )}
-          </div>
+
+            <div className="bg-white rounded-lg border border-[#E8E2D5] overflow-hidden">
+              <div className="px-4 py-3 border-b border-[#E8E2D5]"><h2 className="font-semibold text-sm uppercase tracking-wide text-[#5A5445]">Accessibility Standards (researched for this location)</h2></div>
+              <div className="p-4 space-y-2">{(context.accessibility_standards || []).map((s, i) => (<div key={i} className="flex items-center justify-between text-xs border border-[#F0EBDF] rounded px-3 py-2"><span className="text-[#5A5445]">{s.label}</span><span className="font-mono font-semibold">{s.value}</span><span className="text-[9px] text-[#8A8474] italic">{s.source}</span></div>))}</div>
+            </div>
+          </>
         )}
-      </div>
 
-      {/* RESULTS DISPLAY WITH ORIGINAL EXPORT BUTTONS & AI INSIGHTS */}
-      {analysisResult && (
-        <div className="bg-white border border-[#e8ded1] rounded-lg p-6 shadow-sm space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 pb-3">
-            <h3 className="text-lg font-bold text-gray-800">Site Context Analysis Report</h3>
-            
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                onClick={handleGenerateInsights}
-                disabled={insightsLoading}
-                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-amber-900 bg-amber-100 hover:bg-amber-200 rounded border border-amber-300 disabled:opacity-50"
-              >
-                <Sparkles className="w-3.5 h-3.5 mr-1 text-amber-700" />
-                {insightsLoading ? "Generating..." : "Generate AI Insights"}
-              </button>
-
-              <button
-                onClick={handleCopy}
-                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded border border-gray-300"
-              >
-                {copied ? <Check className="w-3.5 h-3.5 mr-1 text-green-600" /> : <Copy className="w-3.5 h-3.5 mr-1 text-gray-600" />}
-                {copied ? "Copied" : "Copy"}
-              </button>
-
-              <button
-                onClick={handleExportText}
-                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded border border-gray-300"
-              >
-                <FileText className="w-3.5 h-3.5 mr-1 text-gray-600" />
-                Export Text
-              </button>
-
-              <button
-                onClick={handleExportJSON}
-                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded border border-gray-300"
-              >
-                <FileJson className="w-3.5 h-3.5 mr-1 text-gray-600" />
-                Export JSON
-              </button>
-            </div>
+        <div className="bg-white rounded-lg border border-[#E8E2D5] overflow-hidden">
+          <div className="px-4 py-3 border-b border-[#E8E2D5] flex items-center justify-between">
+            <h2 className="font-semibold text-sm uppercase tracking-wide text-[#5A5445]">Zone Capacity (Parks Manual density bands)</h2>
+            <button onClick={addZone} style={BTN_GOLD} className="text-xs font-semibold px-3 py-1.5 rounded-md flex items-center gap-1"><Plus size={13} /> Add zone</button>
           </div>
+          <div className="p-4 space-y-2">
+            {zones.map((z) => { const c = capacityRange(z.area); return (<div key={z.id} className="flex items-center gap-2 text-sm"><input value={z.name} onChange={(e) => updateZone(z.id, { name: e.target.value })} placeholder="Zone name" className="flex-1 bg-[#F7F5F1] border border-[#E8E2D5] rounded px-2 py-1.5 focus:border-[#C9A46A] outline-none" /><input type="number" value={z.area} onChange={(e) => updateZone(z.id, { area: e.target.value })} placeholder="Area m2" className="w-24 bg-[#F7F5F1] border border-[#E8E2D5] rounded px-2 py-1.5 font-mono focus:border-[#C9A46A] outline-none" /><span className="w-32 text-xs font-mono text-[#8A6A3A] text-right">{z.area ? `${c.low}-${c.high} visitors` : "--"}</span><button onClick={() => removeZone(z.id)} className="text-[#B8A98F] hover:text-[#B84C3D]"><Trash2 size={14} /></button></div>); })}
+          </div>
+        </div>
 
-          {aiInsights && (
-            <div className="bg-amber-50 border border-amber-200 rounded p-4 space-y-2">
-              <div className="flex items-center space-x-2 text-amber-900 font-semibold text-sm">
-                <Lightbulb className="w-4 h-4 text-amber-600" />
-                <span>General AI Insights</span>
-              </div>
-              <div className="prose max-w-none text-xs text-amber-950 whitespace-pre-wrap leading-relaxed">
-                {aiInsights}
-              </div>
+        <div className="bg-white rounded-lg border border-[#E8E2D5] overflow-hidden">
+          <div className="px-4 py-3 border-b border-[#E8E2D5] flex items-center justify-between">
+            <h2 className="font-semibold text-sm uppercase tracking-wide text-[#5A5445]">Path & Ramp Accessibility Check</h2>
+            <button onClick={addPath} style={BTN_GOLD} className="text-xs font-semibold px-3 py-1.5 rounded-md flex items-center gap-1"><Plus size={13} /> Add path</button>
+          </div>
+          <div className="p-4 space-y-2">
+            {paths.map((p) => {
+              const c = checkPath(p);
+              return (
+                <div key={p.id} className="border border-[#E8E2D5] rounded-md p-3 space-y-2">
+                  <div className="flex items-center gap-2 text-sm">
+                    <input value={p.name} onChange={(e) => updatePath(p.id, { name: e.target.value })} placeholder="Path/ramp name" className="flex-1 bg-[#F7F5F1] border border-[#E8E2D5] rounded px-2 py-1.5 focus:border-[#C9A46A] outline-none" />
+                    <select value={p.type} onChange={(e) => updatePath(p.id, { type: e.target.value })} className="text-xs bg-[#F7F5F1] border border-[#E8E2D5] rounded px-2 py-1.5"><option value="path">Path</option><option value="ramp">Ramp</option><option value="crossing">Crossing</option></select>
+                    <button onClick={() => removePath(p.id)} className="text-[#B8A98F] hover:text-[#B84C3D]"><Trash2 size={14} /></button>
+                  </div>
+                  <div className="flex items-center gap-3 text-xs">
+                    <label className="flex items-center gap-1">Width (m)<input type="number" step="0.1" value={p.width} onChange={(e) => updatePath(p.id, { width: e.target.value })} className="w-16 bg-[#F7F5F1] border border-[#E8E2D5] rounded px-1.5 py-1 font-mono" /></label>
+                    {p.type === "ramp" && (<label className="flex items-center gap-1">Level change (m)<input type="number" step="0.1" value={p.levelChange} onChange={(e) => updatePath(p.id, { levelChange: e.target.value })} className="w-16 bg-[#F7F5F1] border border-[#E8E2D5] rounded px-1.5 py-1 font-mono" /></label>)}
+                    <span className="flex items-center gap-1 ml-auto" style={{ color: c.status === "pass" ? "#3D7A5C" : c.status === "review" ? "#B8863B" : "#8A8474" }}>{STATUS_ICON[c.status]} {c.label}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg border-2 border-[#E8E2D5] p-4">
+          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+            <h2 className="font-semibold text-sm uppercase tracking-wide text-[#5A5445]">Step 2 - AI Insight & Recommendation</h2>
+            <button onClick={generateInsight} disabled={insightLoading} style={BTN_DARK} className="text-sm font-bold px-4 py-2.5 rounded-md flex items-center gap-2 disabled:opacity-40 shadow-md">
+              <Sparkles size={15} /> {insightLoading ? "Analyzing..." : "Generate AI Insight"}
+            </button>
+          </div>
+          {insightLoading && <p className="text-sm text-[#8A8474]">Reviewing adjacency, capacity, and accessibility data...</p>}
+          {insightError && (<div className="space-y-1"><p className="text-sm text-[#3A362C] flex items-start gap-1"><AlertTriangle size={14} className="mt-0.5 shrink-0 text-[#B84C3D]" /> {friendlyError(insightError)}</p><p className="text-[10px] text-[#8A8474] font-mono pl-5">Technical: {insightError}</p></div>)}
+          {insight && (
+            <div className="space-y-3">
+              <div className="space-y-1">{(insight.findings || []).map((f, i) => (<p key={i} className="text-sm text-[#3A362C]">- {f}</p>))}</div>
+              {insight.forward_constraints?.length > 0 && (<div className="border-t border-[#F0EBDF] pt-2"><p className="text-xs font-semibold text-[#8A6A3A] uppercase tracking-wide mb-1">Constraints to carry into Concept Generator</p>{insight.forward_constraints.map((f, i) => (<p key={i} className="text-xs text-[#5A5445]">- {f}</p>))}</div>)}
             </div>
           )}
+          {!insight && !insightLoading && !insightError && <p className="text-sm text-[#8A8474]">Analyze site context above (Step 1), fill in zones/paths, then generate a synthesis.</p>}
+        </div>
 
-          <div className="prose max-w-none text-gray-800 text-sm whitespace-pre-wrap leading-relaxed">
-            {analysisResult}
+        {insight?.conclusion && (<div className="rounded-lg border-2 p-4" style={{ borderColor: "#C9A46A", backgroundColor: "#FBF1E1" }}><h2 className="font-bold text-sm uppercase tracking-wide text-[#8A6A3A] mb-2">Conclusion</h2><p className="text-sm text-[#3A362C] leading-relaxed font-medium">{insight.conclusion}</p></div>)}
+
+        <div className="bg-[#FFFFFF] rounded-lg border-2 border-[#E8E2D5] p-4">
+          <h2 className="font-semibold text-sm uppercase tracking-wide text-[#5A5445] mb-3">Export Report</h2>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={exportExcel} className="text-xs font-medium border border-[#DDD6C9] px-3 py-2 rounded-md flex items-center gap-1 hover:border-[#C9A46A]"><FileSpreadsheet size={13} /> Excel (.xlsx)</button>
+            <button onClick={exportWord} className="text-xs font-medium border border-[#DDD6C9] px-3 py-2 rounded-md flex items-center gap-1 hover:border-[#C9A46A]"><FileText size={13} /> Word (.rtf)</button>
+            <button onClick={exportPDF} className="text-xs font-medium border border-[#DDD6C9] px-3 py-2 rounded-md flex items-center gap-1 hover:border-[#C9A46A]"><Printer size={13} /> PDF (print)</button>
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
