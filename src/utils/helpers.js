@@ -1,4 +1,20 @@
-// src/utils/helpers.js - Complete Helper Utilities
+// src/utils/helpers.js - Complete Helper & Utility Functions
+
+/**
+ * Converts a File object to Base64 String (Used by SurveyAnalyzer)
+ */
+export function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      resolve("");
+      return;
+    }
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = (error) => reject(error);
+  });
+}
 
 /**
  * Unique ID Generator
@@ -17,10 +33,10 @@ export function friendlyError(err) {
   if (typeof err === "string") return err;
   if (err.message) {
     if (err.message.includes("Failed to fetch") || err.message.includes("NetworkError")) {
-      return "Network error. Please check your connection or CORS settings.";
+      return "Network error. Please check your internet connection or API settings.";
     }
     if (err.message.includes("API Key") || err.message.includes("401") || err.message.includes("403")) {
-      return "API key error. Please check your API key in settings.";
+      return "API key error. Please check your API key in Settings.";
     }
     return err.message;
   }
@@ -37,7 +53,7 @@ export function extractJSON(text, fallback = null) {
   try {
     return JSON.parse(text);
   } catch (e) {
-    // Check for markdown code blocks ```json ... ```
+    // Try extracting JSON from markdown ```json ... ``` blocks
     const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
     if (jsonMatch && jsonMatch[1]) {
       try {
@@ -45,7 +61,7 @@ export function extractJSON(text, fallback = null) {
       } catch (err) {}
     }
 
-    // Check for raw JSON object braces { ... }
+    // Try extracting JSON object {...}
     const firstBrace = text.indexOf("{");
     const lastBrace = text.lastIndexOf("}");
     if (firstBrace !== -1 && lastBrace > firstBrace) {
@@ -54,7 +70,7 @@ export function extractJSON(text, fallback = null) {
       } catch (err) {}
     }
 
-    // Check for raw JSON array brackets [ ... ]
+    // Try extracting JSON array [...]
     const firstBracket = text.indexOf("[");
     const lastBracket = text.lastIndexOf("]");
     if (firstBracket !== -1 && lastBracket > firstBracket) {
@@ -67,9 +83,11 @@ export function extractJSON(text, fallback = null) {
   return fallback;
 }
 export const safeJSONParse = extractJSON;
+export const parseJSON = extractJSON;
+export const parseJson = extractJSON;
 
 /**
- * Formatting Helpers
+ * Number & Date Formatting Helpers
  */
 export function formatNumber(val, decimals = 2) {
   if (val === undefined || val === null || isNaN(val)) return "N/A";
@@ -90,7 +108,7 @@ export function formatDate(dateStr) {
 }
 
 /**
- * Download Helper for Export Buttons
+ * Download & Export Helpers (Used by ExportButtons)
  */
 export function downloadFile(content, filename, type = "text/plain") {
   const blob = new Blob([content], { type });
@@ -102,4 +120,37 @@ export function downloadFile(content, filename, type = "text/plain") {
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
+}
+
+export function exportToJSON(data, filename = "analysis-report.json") {
+  const content = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  downloadFile(content, filename, "application/json");
+}
+
+export function exportToCSV(data, filename = "analysis-report.csv") {
+  let csv = "";
+  if (Array.isArray(data) && data.length > 0) {
+    const headers = Object.keys(data[0]);
+    csv += headers.join(",") + "\n";
+    data.forEach((row) => {
+      csv += headers.map((h) => JSON.stringify(row[h] || "")).join(",") + "\n";
+    });
+  } else if (typeof data === "string") {
+    csv = data;
+  }
+  downloadFile(csv, filename, "text/csv");
+}
+
+export function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  } else {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
+    return Promise.resolve();
+  }
 }
