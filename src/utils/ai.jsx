@@ -1,19 +1,22 @@
-// src/utils/ai.jsx - Production Gemini & Claude API Handler
+// src/utils/ai.jsx - Production AI Handler with 404 & 429 Quota Fallback
 
-// Helper to normalize Gemini model names
-function cleanGeminiModel(modelName) {
-  if (!modelName) return "gemini-2.5-flash";
+function sanitizeModelName(modelName) {
+  if (!modelName || typeof modelName !== "string") {
+    return "gemini-2.5-flash";
+  }
+
   let clean = modelName.trim();
   if (clean.startsWith("models/")) {
     clean = clean.replace("models/", "");
   }
-  if (clean === "gemini-1.5-flash" || clean === "gemini-1.5-pro") {
+
+  if (clean.includes("1.5") || clean === "gemini-flash" || clean === "flash") {
     return "gemini-2.5-flash";
   }
-  return clean;
+
+  return clean || "gemini-2.5-flash";
 }
 
-// Parses Gemini API Response
 export function parseGeminiResponse(data) {
   if (!data) return "";
   if (typeof data === "string") return data;
@@ -24,7 +27,6 @@ export function parseGeminiResponse(data) {
   return JSON.stringify(data);
 }
 
-// Parses Claude / Anthropic API Response
 export function parseClaudeResponse(data) {
   if (!data) return "";
   if (typeof data === "string") return data;
@@ -38,18 +40,24 @@ export function parseClaudeResponse(data) {
   return JSON.stringify(data);
 }
 
-// Call Gemini API with automatic model fallbacks
-export async function callGemini(apiKey, prompt, systemInstruction = "", requestedModel = "") {
+export async function callGemini(apiKey, prompt, systemInstruction = "", rawModel = "") {
   if (!apiKey) throw new Error("Gemini API Key is missing. Please configure it in Settings.");
 
-  const primaryModel = cleanGeminiModel(requestedModel);
-  const modelsToTry = Array.from(new Set([primaryModel, "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]));
+  const primaryModel = sanitizeModelName(rawModel);
+  
+  // Sequence of active models with available free tier allocations
+  const modelsToTry = Array.from(new Set([
+    primaryModel,
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-1.5-flash"
+  ]));
 
   let lastError = null;
 
   for (const model of modelsToTry) {
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey.trim()}`;
       
       const payload = {
         contents: [{ role: "user", parts: [{ text: prompt }] }]
@@ -67,11 +75,19 @@ export async function callGemini(apiKey, prompt, systemInstruction = "", request
 
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
-        const errMsg = errData?.error?.message || `Error ${response.status}`;
+        const errMsg = errData?.error?.message || `API Error (${response.status})`;
         
-        if (response.status === 404 || errMsg.includes("not found")) {
+        // If the model fails due to 404 (Not Found) or 429 (Quota limit 0), try the next fallback model
+        if (
+          response.status === 404 || 
+          response.status === 429 || 
+          errMsg.toLowerCase().includes("not found") ||
+          errMsg.toLowerCase().includes("quota") ||
+          errMsg.toLowerCase().includes("limit")
+        ) {
           lastError = new Error(errMsg);
-          continue; // Fallback to next model
+          console.warn(`Model ${model} failed (${response.status}). Attempting fallback model...`);
+          continue; 
         }
         throw new Error(errMsg);
       }
@@ -80,16 +96,23 @@ export async function callGemini(apiKey, prompt, systemInstruction = "", request
       return parseGeminiResponse(data);
     } catch (err) {
       lastError = err;
-      if (err.message && !err.message.includes("not found") && !err.message.includes("404")) {
+      const isQuotaOrNotFound = 
+        err.message && 
+        (err.message.toLowerCase().includes("not found") || 
+         err.message.toLowerCase().includes("quota") || 
+         err.message.toLowerCase().includes("limit") ||
+         err.message.toLowerCase().includes("404") || 
+         err.message.toLowerCase().includes("429"));
+      
+      if (!isQuotaOrNotFound) {
         throw err;
       }
     }
   }
 
-  throw lastError || new Error("Failed to connect to Gemini API with available models.");
+  throw lastError || new Error("Quota exceeded or model unavailable. Please verify API key in Google AI Studio.");
 }
 
-// Call Anthropic Claude API
 export async function callClaude(apiKey, prompt, systemInstruction = "", model = "claude-3-5-sonnet-20241022") {
   if (!apiKey) throw new Error("Claude API Key is missing. Please configure it in Settings.");
 
@@ -109,7 +132,7 @@ export async function callClaude(apiKey, prompt, systemInstruction = "", model =
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": apiKey,
+      "x-api-key": apiKey.trim(),
       "anthropic-version": "2023-06-01",
       "dangerously-allow-browser": "true"
     },
@@ -125,7 +148,6 @@ export async function callClaude(apiKey, prompt, systemInstruction = "", model =
   return parseClaudeResponse(data);
 }
 
-// Universal callAI function imported across analyzers
 export async function callAI(arg1, arg2, arg3, arg4, arg5) {
   let provider = "gemini";
   let apiKey = "";
