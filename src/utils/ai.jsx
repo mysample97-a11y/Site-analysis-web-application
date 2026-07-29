@@ -1,4 +1,17 @@
-// src/utils/ai.jsx - Complete, Bug-Free AI Utility
+// src/utils/ai.jsx - Production Gemini & Claude API Handler
+
+// Helper to normalize Gemini model names
+function cleanGeminiModel(modelName) {
+  if (!modelName) return "gemini-2.5-flash";
+  let clean = modelName.trim();
+  if (clean.startsWith("models/")) {
+    clean = clean.replace("models/", "");
+  }
+  if (clean === "gemini-1.5-flash" || clean === "gemini-1.5-pro") {
+    return "gemini-2.5-flash";
+  }
+  return clean;
+}
 
 // Parses Gemini API Response
 export function parseGeminiResponse(data) {
@@ -25,33 +38,55 @@ export function parseClaudeResponse(data) {
   return JSON.stringify(data);
 }
 
-// Call Gemini API
-export async function callGemini(apiKey, prompt, systemInstruction = "", model = "gemini-1.5-flash") {
+// Call Gemini API with automatic model fallbacks
+export async function callGemini(apiKey, prompt, systemInstruction = "", requestedModel = "") {
   if (!apiKey) throw new Error("Gemini API Key is missing. Please configure it in Settings.");
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model || "gemini-1.5-flash"}:generateContent?key=${apiKey}`;
-  
-  const payload = {
-    contents: [{ role: "user", parts: [{ text: prompt }] }]
-  };
+  const primaryModel = cleanGeminiModel(requestedModel);
+  const modelsToTry = Array.from(new Set([primaryModel, "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]));
 
-  if (systemInstruction) {
-    payload.systemInstruction = { parts: [{ text: systemInstruction }] };
+  let lastError = null;
+
+  for (const model of modelsToTry) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      
+      const payload = {
+        contents: [{ role: "user", parts: [{ text: prompt }] }]
+      };
+
+      if (systemInstruction) {
+        payload.systemInstruction = { parts: [{ text: systemInstruction }] };
+      }
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        const errMsg = errData?.error?.message || `Error ${response.status}`;
+        
+        if (response.status === 404 || errMsg.includes("not found")) {
+          lastError = new Error(errMsg);
+          continue; // Fallback to next model
+        }
+        throw new Error(errMsg);
+      }
+
+      const data = await response.json();
+      return parseGeminiResponse(data);
+    } catch (err) {
+      lastError = err;
+      if (err.message && !err.message.includes("not found") && !err.message.includes("404")) {
+        throw err;
+      }
+    }
   }
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(errData?.error?.message || `Gemini API Error (${response.status})`);
-  }
-
-  const data = await response.json();
-  return parseGeminiResponse(data);
+  throw lastError || new Error("Failed to connect to Gemini API with available models.");
 }
 
 // Call Anthropic Claude API
@@ -90,7 +125,7 @@ export async function callClaude(apiKey, prompt, systemInstruction = "", model =
   return parseClaudeResponse(data);
 }
 
-// Universal callAI function imported by SolarAnalyzer, WindAnalyzer, etc.
+// Universal callAI function imported across analyzers
 export async function callAI(arg1, arg2, arg3, arg4, arg5) {
   let provider = "gemini";
   let apiKey = "";
