@@ -31,8 +31,7 @@ export async function callAI({ provider, apiKey, content, maxTokens = 1500, useW
     if (data.error) throw new Error(data.error.message || "Gemini API error");
     const text = (data.candidates?.[0]?.content?.parts || [])
       .map((p) => p.text || "")
-      .join("
-")
+      .join("\n")
       .trim();
     if (!text) throw new Error("Gemini returned an empty response.");
     return text;
