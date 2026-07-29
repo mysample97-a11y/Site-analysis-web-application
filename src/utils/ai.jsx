@@ -1,19 +1,23 @@
-// src/utils/ai.jsx - Full Production AI Service Handler
+// src/utils/ai.jsx - Non-intrusive API Router
 
-export function sanitizeModelName(modelName) {
-  if (!modelName || typeof modelName !== "string") {
-    return "gemini-2.5-flash";
-  }
+// Intercepts and maps deprecated models to current active models
+function resolveModelName(modelName) {
+  if (!modelName || typeof modelName !== "string") return "gemini-2.5-flash";
+  
   let clean = modelName.trim();
   if (clean.startsWith("models/")) {
     clean = clean.replace("models/", "");
   }
-  if (clean.includes("1.5") || clean === "gemini-flash" || clean === "flash" || clean === "gemini-1.5-flash") {
+  
+  // Direct mapping from retired 1.5 endpoints to 2.5/2.0
+  if (clean.includes("1.5") || clean === "flash") {
     return "gemini-2.5-flash";
   }
+  
   return clean || "gemini-2.5-flash";
 }
 
+// Parses Gemini API Responses
 export function parseGeminiResponse(data) {
   if (!data) return "";
   if (typeof data === "string") return data;
@@ -24,6 +28,7 @@ export function parseGeminiResponse(data) {
   return JSON.stringify(data);
 }
 
+// Parses Claude API Responses
 export function parseClaudeResponse(data) {
   if (!data) return "";
   if (typeof data === "string") return data;
@@ -37,94 +42,73 @@ export function parseClaudeResponse(data) {
   return JSON.stringify(data);
 }
 
-export async function callGemini(apiKey, prompt, systemInstruction = "", rawModel = "", imageData = null) {
-  if (!apiKey) throw new Error("Gemini API Key is missing. Please enter your API key in Settings or top bar.");
-
-  const primaryModel = sanitizeModelName(rawModel);
-  const modelsToTry = Array.from(new Set([
-    primaryModel,
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash"
-  ]));
-
-  let lastError = null;
-
-  for (const model of modelsToTry) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey.trim()}`;
-      
-      const parts = [];
-
-      if (imageData) {
-        let base64String = imageData;
-        let mimeType = "image/jpeg";
-        if (imageData.includes("data:")) {
-          const split = imageData.split(",");
-          mimeType = split[0].match(/:(.*?);/)?.[1] || "image/jpeg";
-          base64String = split[1] || imageData;
-        }
-        parts.push({
-          inlineData: {
-            mimeType: mimeType,
-            data: base64String
-          }
-        });
-      }
-
-      if (prompt) {
-        parts.push({ text: typeof prompt === "string" ? prompt : JSON.stringify(prompt) });
-      }
-
-      const payload = {
-        contents: [{ role: "user", parts: parts }]
-      };
-
-      if (systemInstruction) {
-        payload.systemInstruction = { parts: [{ text: systemInstruction }] };
-      }
-
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        const errMsg = errData?.error?.message || `API Error (${response.status})`;
-        
-        if (
-          response.status === 404 || 
-          response.status === 429 || 
-          errMsg.toLowerCase().includes("not found") ||
-          errMsg.toLowerCase().includes("quota")
-        ) {
-          lastError = new Error(errMsg);
-          continue; 
-        }
-        throw new Error(errMsg);
-      }
-
-      const data = await response.json();
-      return parseGeminiResponse(data);
-    } catch (err) {
-      lastError = err;
-      if (!err.message || (!err.message.toLowerCase().includes("not found") && !err.message.toLowerCase().includes("404") && !err.message.toLowerCase().includes("quota") && !err.message.toLowerCase().includes("429"))) {
-        throw err;
-      }
-    }
+// Core Gemini Handler
+export async function callGemini(apiKey, prompt, systemInstruction = "", requestedModel = "", imageData = null) {
+  const cleanKey = (apiKey || "").trim();
+  if (!cleanKey) {
+    throw new Error("Gemini API key is missing. Please enter your API key in Settings.");
   }
 
-  throw lastError || new Error("Failed to connect to Gemini API.");
+  const activeModel = resolveModelName(requestedModel);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent?key=${cleanKey}`;
+
+  const parts = [];
+
+  // Handle attached images if passed
+  if (imageData) {
+    let base64String = imageData;
+    let mimeType = "image/jpeg";
+    if (imageData.includes("data:")) {
+      const split = imageData.split(",");
+      mimeType = split[0].match(/:(.*?);/)?.[1] || "image/jpeg";
+      base64String = split[1] || imageData;
+    }
+    parts.push({
+      inlineData: { mimeType, data: base64String }
+    });
+  }
+
+  if (prompt) {
+    parts.push({ text: typeof prompt === "string" ? prompt : JSON.stringify(prompt) });
+  }
+
+  const payload = {
+    contents: [{ role: "user", parts }]
+  };
+
+  if (systemInstruction) {
+    payload.systemInstruction = { parts: [{ text: systemInstruction }] };
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  const errData = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const errMsg = errData?.error?.message || `API Error (${response.status})`;
+    if (response.status === 400 && errMsg.toLowerCase().includes("key")) {
+      throw new Error("API key invalid. Please verify your Google AI Studio key in Settings.");
+    }
+    throw new Error(errMsg);
+  }
+
+  return parseGeminiResponse(errData);
 }
 
+// Core Claude Handler
 export async function callClaude(apiKey, prompt, systemInstruction = "", model = "claude-3-5-sonnet-20241022", imageData = null) {
-  if (!apiKey) throw new Error("Claude API Key is missing. Please enter your API key in Settings.");
+  const cleanKey = (apiKey || "").trim();
+  if (!cleanKey) {
+    throw new Error("Claude API key is missing. Please enter your API key in Settings.");
+  }
 
   const url = "https://api.anthropic.com/v1/messages";
-
   const content = [];
+
   if (imageData) {
     let base64String = imageData;
     let mimeType = "image/jpeg";
@@ -135,11 +119,7 @@ export async function callClaude(apiKey, prompt, systemInstruction = "", model =
     }
     content.push({
       type: "image",
-      source: {
-        type: "base64",
-        media_type: mimeType,
-        data: base64String
-      }
+      source: { type: "base64", media_type: mimeType, data: base64String }
     });
   }
 
@@ -148,7 +128,7 @@ export async function callClaude(apiKey, prompt, systemInstruction = "", model =
   const payload = {
     model: model || "claude-3-5-sonnet-20241022",
     max_tokens: 2048,
-    messages: [{ role: "user", content: content }]
+    messages: [{ role: "user", content }]
   };
 
   if (systemInstruction) {
@@ -159,7 +139,7 @@ export async function callClaude(apiKey, prompt, systemInstruction = "", model =
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": apiKey.trim(),
+      "x-api-key": cleanKey,
       "anthropic-version": "2023-06-01",
       "dangerously-allow-browser": "true"
     },
@@ -175,6 +155,7 @@ export async function callClaude(apiKey, prompt, systemInstruction = "", model =
   return parseClaudeResponse(data);
 }
 
+// Flexible Universal Wrapper for all Analyzers
 export async function callAI(arg1, arg2, arg3, arg4, arg5) {
   let provider = "gemini";
   let apiKey = "";
