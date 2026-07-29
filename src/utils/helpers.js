@@ -1,68 +1,105 @@
-export function uid() {
-  return Math.random().toString(36).slice(2, 9);
+// src/utils/helpers.js - Complete Helper Utilities
+
+/**
+ * Unique ID Generator
+ */
+export function uid(prefix = "id") {
+  return `${prefix}_${Math.random().toString(36).substring(2, 9)}_${Date.now()}`;
+}
+export const generateUid = uid;
+export const getUid = uid;
+
+/**
+ * User-Friendly Error Formatter
+ */
+export function friendlyError(err) {
+  if (!err) return "An unknown error occurred.";
+  if (typeof err === "string") return err;
+  if (err.message) {
+    if (err.message.includes("Failed to fetch") || err.message.includes("NetworkError")) {
+      return "Network error. Please check your connection or CORS settings.";
+    }
+    if (err.message.includes("API Key") || err.message.includes("401") || err.message.includes("403")) {
+      return "API key error. Please check your API key in settings.";
+    }
+    return err.message;
+  }
+  return JSON.stringify(err);
 }
 
-export function downloadBlob(content, filename, type) {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
+/**
+ * Robust JSON Extractor (Handles Markdown Code Blocks & Raw Responses)
+ */
+export function extractJSON(text, fallback = null) {
+  if (!text) return fallback;
+  if (typeof text === "object") return text;
 
-export function fileToBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result.split(",")[1]);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    // Check for markdown code blocks ```json ... ```
+    const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (jsonMatch && jsonMatch[1]) {
+      try {
+        return JSON.parse(jsonMatch[1].trim());
+      } catch (err) {}
+    }
+
+    // Check for raw JSON object braces { ... }
+    const firstBrace = text.indexOf("{");
+    const lastBrace = text.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(text.substring(firstBrace, lastBrace + 1));
+      } catch (err) {}
+    }
+
+    // Check for raw JSON array brackets [ ... ]
+    const firstBracket = text.indexOf("[");
+    const lastBracket = text.lastIndexOf("]");
+    if (firstBracket !== -1 && lastBracket > firstBracket) {
+      try {
+        return JSON.parse(text.substring(firstBracket, lastBracket + 1));
+      } catch (err) {}
+    }
+  }
+
+  return fallback;
+}
+export const safeJSONParse = extractJSON;
+
+/**
+ * Formatting Helpers
+ */
+export function formatNumber(val, decimals = 2) {
+  if (val === undefined || val === null || isNaN(val)) return "N/A";
+  return Number(val).toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: decimals,
   });
 }
 
-export function extractJSON(text) {
-  const firstBrace = text.indexOf("{");
-  const lastBrace = text.lastIndexOf("}");
-  if (firstBrace === -1 || lastBrace === -1) throw new Error("No JSON object found in the AI response.");
-  return JSON.parse(text.slice(firstBrace, lastBrace + 1));
+export function formatPercent(val) {
+  if (val === undefined || val === null || isNaN(val)) return "0%";
+  return `${Number(val).toFixed(1)}%`;
 }
 
-export function extractJSONArray(text) {
-  const start = text.indexOf("[");
-  const end = text.lastIndexOf("]");
-  if (start === -1 || end === -1) throw new Error("No JSON array found in the AI response.");
-  return JSON.parse(text.slice(start, end + 1));
+export function formatDate(dateStr) {
+  if (!dateStr) return new Date().toLocaleDateString();
+  return new Date(dateStr).toLocaleDateString();
 }
 
-export function friendlyError(rawMessage) {
-  const msg = (rawMessage || "").toLowerCase();
-  if (msg.includes("no api key") || msg.includes("api key")) {
-    return "You need to add an API key in Settings before using AI features.";
-  }
-  if (msg.includes("json") || msg.includes("expected") || msg.includes("unexpected token")) {
-    return "The AI's answer got cut off before it finished. Try again — it often succeeds on retry.";
-  }
-  if (msg.includes("api returned") || msg.includes("status") || msg.includes("401") || msg.includes("403")) {
-    return "The AI service didn't respond successfully — check your API key is correct and has quota remaining, or wait a moment and try again.";
-  }
-  if (msg.includes("empty response")) {
-    return "The AI didn't send back any content that time. Try again.";
-  }
-  return "Something unexpected happened. Try again — if it keeps failing, note the technical detail below.";
-}
-
-export function barsHtml(data, valueKey, nameKey, color) {
-  const max = Math.max(1, ...data.map((d) => d[valueKey]));
-  return data
-    .map(
-      (d) => `<div style="display:flex;align-items:center;margin-bottom:4px;">
-        <div style="width:170px;font-size:11px;padding-right:8px;text-align:right;">${d[nameKey]}</div>
-        <div style="background:${color};height:14px;width:${Math.max(4, (d[valueKey] / max) * 220)}px;border-radius:2px;margin-right:6px;"></div>
-        <div style="font-size:11px;font-weight:600;">${d[valueKey]}</div>
-      </div>`
-    )
-    .join("");
+/**
+ * Download Helper for Export Buttons
+ */
+export function downloadFile(content, filename, type = "text/plain") {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }
