@@ -1,38 +1,22 @@
 import React, { useState } from "react";
-import { 
-  Sparkles, 
-  Search, 
-  Image as ImageIcon, 
-  Copy, 
-  Check, 
-  Download, 
-  FileText, 
-  AlertTriangle, 
-  Trash2,
-  Lightbulb,
-  FileJson
-} from "lucide-react";
+import { Sparkles, Search, Image as ImageIcon, Copy, Check, Download, FileText, AlertTriangle, Trash2, Lightbulb, FileJson } from "lucide-react";
 import { callAI } from "../utils/ai";
 
-export default function SiteContextAnalyzer({ apiKey, apiProvider, model }) {
-  // Input States
-  const [siteLocation, setSiteLocation] = useState("");
+export default function SiteContextAnalyzer({ apiKey, apiProvider, model, onGenerateInsights }) {
+  const [siteLocation, setSiteLocation] = useState("Al safa 2 Park,Dubai");
   const [surroundings, setSurroundings] = useState("");
   const [selectedFile, setSelectedFile] = useState(null);
   const [imageData, setImageData] = useState(null);
 
-  // Analysis & Error States
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [technicalError, setTechnicalError] = useState(null);
   const [analysisResult, setAnalysisResult] = useState("");
 
-  // Insights & UI Action States
   const [copied, setCopied] = useState(false);
   const [insightsLoading, setInsightsLoading] = useState(false);
   const [aiInsights, setAiInsights] = useState("");
 
-  // Handle File Upload
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
@@ -50,10 +34,9 @@ export default function SiteContextAnalyzer({ apiKey, apiProvider, model }) {
     setImageData(null);
   };
 
-  // Main Site Context Analysis
   const handleAnalyze = async () => {
     if (!siteLocation && !surroundings && !imageData) {
-      setError("Please provide a site location, context description, or upload a GIS/map image.");
+      setError("Please describe the site location, surroundings, or upload a GIS/map image.");
       return;
     }
 
@@ -63,27 +46,23 @@ export default function SiteContextAnalyzer({ apiKey, apiProvider, model }) {
     setAnalysisResult("");
     setAiInsights("");
 
-    const systemPrompt = `You are an expert urban planner and architectural site analysis consultant for landscape architecture competitions. 
-Provide a comprehensive, professional site context evaluation covering:
-1. Location & Context Summary
-2. Urban & Zoning Dynamics
-3. Accessibility, Transport & Pedestrian Circulation
-4. Environmental, Views & Microclimate Considerations
-5. SWOT Analysis (Strengths, Weaknesses, Opportunities, Threats)
-6. Strategic Design Recommendations for the site competition.`;
+    const systemPrompt = `You are an expert urban planning and architectural site analysis consultant. Provide a detailed, professional analysis of the site context based on the location, surroundings, and image provided. Include urban context, accessibility, environmental factors, microclimate, and strategic design recommendations.`;
 
-    const userPrompt = `Site Name / Location: ${siteLocation || "Unspecified"}
-Site Surroundings & Context Description: ${surroundings || "None provided"}
+    const userPrompt = `Site Name or Address: ${siteLocation || "Unspecified"}
+Site Surroundings & Context: ${surroundings || "None provided"}
 
-Analyze the architectural and urban site context based on this location information and attached map/GIS image (if provided).`;
+Please provide a comprehensive site context analysis.`;
 
     try {
+      // Uses active model gemini-2.5-flash instead of deprecated 1.5
+      const activeModel = (!model || model.includes("1.5")) ? "gemini-2.5-flash" : model;
+
       const result = await callAI({
         provider: apiProvider || "gemini",
         apiKey: apiKey,
         prompt: userPrompt,
         systemInstruction: systemPrompt,
-        model: model || "gemini-2.5-flash",
+        model: activeModel,
         imageData: imageData
       });
 
@@ -98,27 +77,29 @@ Analyze the architectural and urban site context based on this location informat
     }
   };
 
-  // Generate Key AI Insights Summary
   const handleGenerateInsights = async () => {
     if (!analysisResult) return;
 
     setInsightsLoading(true);
     try {
-      const prompt = `Based on the following site context analysis report, extract 5 key high-impact design insights and strategic opportunities for a landscape architecture concept:
+      const activeModel = (!model || model.includes("1.5")) ? "gemini-2.5-flash" : model;
+      
+      const prompt = `Based on the following site context analysis, extract 5 key actionable strategic design insights for landscape architecture:
 
----
-${analysisResult}
----`;
+${analysisResult}`;
 
       const insights = await callAI({
         provider: apiProvider || "gemini",
         apiKey: apiKey,
         prompt: prompt,
-        systemInstruction: "You are an executive architectural advisor. Extract high-priority actionable design insights.",
-        model: model || "gemini-2.5-flash"
+        systemInstruction: "You are an architectural strategy consultant. Extract key high-impact design insights.",
+        model: activeModel
       });
 
       setAiInsights(insights);
+      if (onGenerateInsights) {
+        onGenerateInsights(insights);
+      }
     } catch (err) {
       console.error("Error generating insights:", err);
     } finally {
@@ -126,55 +107,49 @@ ${analysisResult}
     }
   };
 
-  // Action Bar Handlers: Copy, Export Text, Export JSON
   const handleCopy = () => {
-    const textToCopy = aiInsights 
-      ? `${analysisResult}\n\n=== KEY AI INSIGHTS ===\n${aiInsights}`
-      : analysisResult;
-
-    navigator.clipboard.writeText(textToCopy);
+    const text = aiInsights ? `${analysisResult}\n\n--- AI INSIGHTS ---\n${aiInsights}` : analysisResult;
+    navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
   const handleExportText = () => {
-    const textContent = `SITE CONTEXT ANALYSIS REPORT\nLocation: ${siteLocation || "Unspecified"}\nDate: ${new Date().toLocaleDateString()}\n\n${analysisResult}\n\n${aiInsights ? `KEY AI INSIGHTS:\n${aiInsights}` : ""}`;
+    const textContent = `SITE CONTEXT ANALYSIS REPORT\nSite: ${siteLocation}\n\n${analysisResult}\n\n${aiInsights ? `AI INSIGHTS:\n${aiInsights}` : ""}`;
     const blob = new Blob([textContent], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `Site_Analysis_${siteLocation ? siteLocation.replace(/[^a-z0-9]/gi, '_') : 'Report'}.txt`;
+    link.download = `Site_Analysis_${siteLocation.replace(/[^a-z0-9]/gi, '_')}.txt`;
     link.click();
     URL.revokeObjectURL(url);
   };
 
   const handleExportJSON = () => {
-    const jsonData = {
+    const data = {
       siteName: siteLocation,
       surroundings: surroundings,
-      date: new Date().toISOString(),
       analysis: analysisResult,
       insights: aiInsights || null
     };
-    const blob = new Blob([JSON.stringify(jsonData, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `Site_Analysis_${siteLocation ? siteLocation.replace(/[^a-z0-9]/gi, '_') : 'Data'}.json`;
+    link.download = `Site_Analysis_${siteLocation.replace(/[^a-z0-9]/gi, '_')}.json`;
     link.click();
     URL.revokeObjectURL(url);
   };
 
   return (
-    <div className="space-y-6 max-w-4xl mx-auto p-4">
+    <div className="space-y-6 max-w-4xl mx-auto">
       {/* STEP 1 CARD */}
-      <div className="bg-[#fcfaf7] border border-[#e8ded1] rounded-xl p-6 shadow-sm">
-        <h2 className="text-sm font-semibold text-[#6b471c] uppercase tracking-wider mb-4">
+      <div className="bg-[#fcfaf7] border border-[#e8ded1] rounded-lg p-6 shadow-sm">
+        <h2 className="text-sm font-semibold text-[#6b471c] uppercase tracking-wide mb-4">
           STEP 1 — DESCRIBE YOUR SITE
         </h2>
 
         <div className="space-y-4">
-          {/* Site Name / Address */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Site Name or Address
@@ -184,11 +159,10 @@ ${analysisResult}
               value={siteLocation}
               onChange={(e) => setSiteLocation(e.target.value)}
               placeholder="Al safa 2 Park,Dubai"
-              className="w-full p-3 bg-white border border-gray-300 rounded-md text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#c59b27]"
+              className="w-full p-3 bg-white border border-gray-300 rounded-md text-gray-800 focus:outline-none focus:ring-1 focus:ring-amber-500"
             />
           </div>
 
-          {/* Site Surroundings & Context */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Site Surroundings & Context
@@ -198,17 +172,16 @@ ${analysisResult}
               value={surroundings}
               onChange={(e) => setSurroundings(e.target.value)}
               placeholder="Describe what's around the site (adjacent buildings, roads, land uses) - or upload a GIS/map image below instead"
-              className="w-full p-3 bg-white border border-gray-300 rounded-md text-gray-800 focus:outline-none focus:ring-2 focus:ring-[#c59b27]"
+              className="w-full p-3 bg-white border border-gray-300 rounded-md text-gray-800 focus:outline-none focus:ring-1 focus:ring-amber-500"
             />
           </div>
 
-          {/* Upload File Input */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Upload GIS / Site Map Image
             </label>
             <div className="flex items-center space-x-3">
-              <label className="cursor-pointer inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-[#fbf3e6] hover:bg-[#f3e7d3] focus:outline-none transition-colors">
+              <label className="cursor-pointer inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-[#fbf3e6] hover:bg-[#f3e7d3]">
                 <ImageIcon className="w-4 h-4 mr-2 text-gray-600" />
                 Choose file
                 <input
@@ -224,24 +197,18 @@ ${analysisResult}
               {selectedFile && (
                 <button
                   onClick={handleClearFile}
-                  className="p-1 text-gray-400 hover:text-red-500 rounded"
+                  className="p-1 text-gray-400 hover:text-red-500"
                   title="Remove image"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
               )}
             </div>
-            {selectedFile && (
-              <p className="text-xs text-amber-700 mt-1">
-                Loaded file: {selectedFile.name}
-              </p>
-            )}
             <p className="text-xs text-gray-400 mt-1">
               Image upload may not work inside the Claude mobile app (platform restriction) - try your phone's regular browser, or use the text fields above.
             </p>
           </div>
 
-          {/* Primary Submit Button */}
           <button
             onClick={handleAnalyze}
             disabled={loading}
@@ -252,7 +219,6 @@ ${analysisResult}
           </button>
         </div>
 
-        {/* Error Display */}
         {error && (
           <div className="mt-4 p-4 bg-red-50 border border-red-200 text-red-800 rounded-md text-sm space-y-1">
             <div className="flex items-start space-x-2">
@@ -262,7 +228,7 @@ ${analysisResult}
               </div>
             </div>
             {technicalError && (
-              <p className="text-xs text-red-600 mt-2 font-mono break-all">
+              <p className="text-xs text-red-500 font-mono mt-1 break-all">
                 Technical: {technicalError}
               </p>
             )}
@@ -270,58 +236,41 @@ ${analysisResult}
         )}
       </div>
 
-      {/* ANALYSIS RESULTS CARD */}
+      {/* RESULTS DISPLAY WITH ORIGINAL EXPORT BUTTONS & AI INSIGHTS */}
       {analysisResult && (
-        <div className="bg-white border border-[#e8ded1] rounded-xl p-6 shadow-sm space-y-6">
-          {/* Header & Export Toolbar */}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 pb-4">
-            <h3 className="text-lg font-bold text-gray-800">
-              Site Context Analysis Report
-            </h3>
-
-            {/* ACTION & EXPORT BUTTONS */}
+        <div className="bg-white border border-[#e8ded1] rounded-lg p-6 shadow-sm space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 pb-3">
+            <h3 className="text-lg font-bold text-gray-800">Site Context Analysis Report</h3>
+            
             <div className="flex flex-wrap items-center gap-2">
-              {/* Generate AI Insights */}
               <button
                 onClick={handleGenerateInsights}
                 disabled={insightsLoading}
-                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-amber-900 bg-amber-100 hover:bg-amber-200 rounded-md border border-amber-300 transition-colors disabled:opacity-50"
+                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-amber-900 bg-amber-100 hover:bg-amber-200 rounded border border-amber-300 disabled:opacity-50"
               >
-                <Sparkles className="w-3.5 h-3.5 mr-1.5 text-amber-700" />
-                {insightsLoading ? "Extracting..." : "Generate AI Insights"}
+                <Sparkles className="w-3.5 h-3.5 mr-1 text-amber-700" />
+                {insightsLoading ? "Generating..." : "Generate AI Insights"}
               </button>
 
-              {/* Copy Report */}
               <button
                 onClick={handleCopy}
-                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-md border border-gray-300 transition-colors"
+                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded border border-gray-300"
               >
-                {copied ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 mr-1 text-green-600" />
-                    Copied
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5 mr-1 text-gray-600" />
-                    Copy Report
-                  </>
-                )}
+                {copied ? <Check className="w-3.5 h-3.5 mr-1 text-green-600" /> : <Copy className="w-3.5 h-3.5 mr-1 text-gray-600" />}
+                {copied ? "Copied" : "Copy"}
               </button>
 
-              {/* Export Text */}
               <button
                 onClick={handleExportText}
-                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-md border border-gray-300 transition-colors"
+                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded border border-gray-300"
               >
                 <FileText className="w-3.5 h-3.5 mr-1 text-gray-600" />
                 Export Text
               </button>
 
-              {/* Export JSON */}
               <button
                 onClick={handleExportJSON}
-                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-md border border-gray-300 transition-colors"
+                className="inline-flex items-center px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded border border-gray-300"
               >
                 <FileJson className="w-3.5 h-3.5 mr-1 text-gray-600" />
                 Export JSON
@@ -329,12 +278,11 @@ ${analysisResult}
             </div>
           </div>
 
-          {/* AI Insights Highlight Box */}
           {aiInsights && (
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 space-y-2">
+            <div className="bg-amber-50 border border-amber-200 rounded p-4 space-y-2">
               <div className="flex items-center space-x-2 text-amber-900 font-semibold text-sm">
                 <Lightbulb className="w-4 h-4 text-amber-600" />
-                <span>Strategic AI Insights & Key Takeaways</span>
+                <span>General AI Insights</span>
               </div>
               <div className="prose max-w-none text-xs text-amber-950 whitespace-pre-wrap leading-relaxed">
                 {aiInsights}
@@ -342,7 +290,6 @@ ${analysisResult}
             </div>
           )}
 
-          {/* Main Body Report */}
           <div className="prose max-w-none text-gray-800 text-sm whitespace-pre-wrap leading-relaxed">
             {analysisResult}
           </div>
